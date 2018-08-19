@@ -1,0 +1,179 @@
+---
+title: "Practical Machine Learning - Course Project"
+author: "Tobias Weinsjö"
+date: "17 augusti 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+Six participants of an experiment, have been performing a dumbbell lift in five ways, one correct way and four incorrect ways. While doing the exercises, they have been wearing three different measureing equipment, one belt, one at the arm and one at the forearm. Based on the data collected by these devices, we are to predict which movement of the five that has been performed.
+
+# Prerequisites
+````{r eval = TRUE, echo = TRUE, warning = FALSE, message = FALSE}
+library(caret)
+
+# Load training data
+training <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+
+# Load testing data
+testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+
+# Set the random seed
+set.seed(123)
+````
+
+# Check and clean the data
+````{r eval = FALSE, echo = TRUE}
+# Take a first look at the data
+View(training)
+````
+
+There are obviously some rows deviating from the other. They seem to have values in every cell, but also contain error messages, such as "#DIV/0!"
+
+````{r eval = TRUE, echo = TRUE}
+# Calculate the number of rows with values in every coulmn
+sum(complete.cases(training))
+
+# Get the rows containing values in every column
+cc <- complete.cases(training)
+
+# Check if the column "new_window" is an identifier of these rows
+table(training$new_window[cc])
+````
+
+These rows are apparantly summarized rows, because they are the only one having data in the columns being summaries, such as "avg_roll_belt" or "max_roll_belt". These observaions are of another type and hence should not be included in the table. We'll make a new training dataset that excludes these observations, and also excludes the summarized columns.
+
+````{r eval = TRUE, echo = TRUE}
+# Remove summarized observations from the training dataset
+training <- training[-cc,]
+
+# Find incomplete columns
+ccCol <- complete.cases(t(training))
+
+# Remove incomplete columns
+training <- training[,ccCol]
+
+# Find columns with very little variance
+nearZeroVarCol <- nearZeroVar(training)
+
+# Remove columns with very little variance
+training <- training[,-nearZeroVarCol]
+
+# See the number of rows and columns left
+dim(training)
+````
+
+There are still a few columns that has data, which we assume do not have any impact on the classification of the activity, e.g. timestamp. Also some of them contain data in a format that won't work with the Principal Component Analysis, which we intend to do, because the calculations will take too long if we don't.
+
+````{r eval = TRUE, echo = TRUE}
+# Remove the unnecessary columns
+training <- training[,-c(1,3:6)]
+````
+
+# Analysis
+
+Computatings will take too long when applying some of the more complex algorithms, such as random forest or boosting, hence we will replace the covariates by their principal components.
+
+````{r eval = TRUE, echo = TRUE}
+# Calculate principal components (leaving the first column out, because it's a factor-variable)
+PC_Obj <- prcomp(training[,2:(ncol(training)-1)])
+
+# See the importance of each principal component
+summary(PC_Obj)
+````
+
+The first 9 principal components describes more than 95 % of the pattern, hence we settle with 9.
+
+````{r eval = TRUE, echo = TRUE}
+# Create a new training set with the 9 most important principal components and the outcome variable, "classe"
+trainPC <- data.frame(user_name = training$user_name, PC_Obj$x[,1:9], classe = training$classe)
+````
+
+We want to try different models and evaulate them to see which one fits the best, before deciding on a final one. Hence we use cross-validation and we use K-fold, with K = 5.
+
+````{r eval = TRUE, echo = TRUE}
+# Create 5 k-folds
+folds <- createFolds(y = trainPC$classe, k = 5, list = TRUE, returnTrain = TRUE)
+````
+
+We start off by trying Decision Tree and Linear Discriminant Analysis and see how they perform.
+
+````{r eval = TRUE, echo = TRUE}
+# Train two different models on a fold each
+model_rpart <- train(classe~., data = trainPC[folds[[1]], ], method = "rpart")
+model_lda <- train(classe~., data = trainPC[folds[[2]], ], method = "lda")
+
+# Make predictions on the validation set for each model
+pred_rpart <- predict(model_rpart, trainPC[-folds[[1]], ])
+pred_lda <- predict(model_lda, trainPC[-folds[[2]], ])
+
+# Evaluate each model
+confusionMatrix(pred_rpart, trainPC[-folds[[1]], 11])$overall
+confusionMatrix(pred_lda, trainPC[-folds[[2]], 11])$overall
+````
+
+Decision Tree performed an accuracy of 39 % and Linear Discriminant Analysis 52 %. That's not good enough.
+
+Random Forest and Boosting are said to be the best, but also the most computationally demanding. Fitting these on this data will take too long. But we believe that they will perform well, even if we only use a fraction of the data.
+
+````{r eval = TRUE, echo = TRUE}
+# Take small subsamples of the folds designated for the Random Forest and Boosting models
+small_fold_3 <- sample(folds[[3]], length(folds[[3]])/10)
+small_fold_4 <- sample(folds[[4]], length(folds[[4]])/10)
+
+# Split the subsamples into training and validation sets
+inTrain_3 <- createDataPartition(small_fold_3, p = 0.8, list = FALSE)
+inTrain_4 <- createDataPartition(small_fold_4, p = 0.8, list = FALSE)
+small_fold_3_train <- small_fold_3[inTrain_3]; small_fold_3_val <- small_fold_3[-inTrain_3]
+small_fold_4_train <- small_fold_4[inTrain_4]; small_fold_4_val <- small_fold_4[-inTrain_4]
+````
+
+Fit a Random Forest model and a Boosting model, using the smaller training data sets.
+
+````{r eval = TRUE, echo = TRUE}
+# Train two different models on a fold each
+model_rf <- train(classe~., data = trainPC[small_fold_3_train, ], method = "rf")
+model_gbm <- train(classe~., data = trainPC[small_fold_4_train, ], method = "gbm", verbose = FALSE)
+
+# Make predictions on the validation set for each model
+pred_rf <- predict(model_rf, trainPC[small_fold_3_val, ])
+pred_gbm <- predict(model_gbm, trainPC[small_fold_4_val, ])
+
+# Evaluate each model
+confusionMatrix(pred_rf, trainPC[small_fold_3_val, 11])$overall
+confusionMatrix(pred_gbm, trainPC[small_fold_4_val, 11])$overall
+````
+
+Apparantly these methods are not good enough either, since they only have 71 % and 62 % accuracy, respectively.
+
+For the last model, we'll do a Random Forest on the 5th k-fold, however, we'll do it not on the principal components, but rather using all the 53 regressors, just to be sure that we find a model good enough.
+
+````{r eval = TRUE, echo = TRUE}
+# Take a smaller sample of the 5th fold
+small_fold_5 <- sample(folds[[5]], length(folds[[5]])/10)
+
+# Split the fold into training and validation set
+inTrain_5 <- createDataPartition(small_fold_5, p = 0.8, list = FALSE)
+small_fold_5_train <- small_fold_5[inTrain_5]; small_fold_5_val <- small_fold_5[-inTrain_5]
+
+# Fit the model
+model_rf2 <- train(classe~., data = training[small_fold_5_train, ], method = "rf")
+
+# Make predictions on the validation set for the model
+pred_rf2 <- predict(model_rf2, training[small_fold_5_val,])
+
+# Evaluate the model
+confusionMatrix(pred_rf2, training[small_fold_5_val, 54])$overall
+````
+
+This model has an accuracy of 93 % and will be our chosen one.
+
+# Conclusion
+
+The four first models which were all based on the 9 most important principal components (describing more than 95 % of the pattern), did not perform well enough. The last method, using the method Random Forest on all the remaining 53 variables, but a training sample size of only 6.4 % (0.8 * 0.1 * 0.8) performed best by far!
+
+The out-of-sample-error is probably larger than 7 %, but shouldn't be too much larger, around 10 %, I feel
